@@ -43,15 +43,15 @@ updateChecksum packet = packet {checksum = calcSum . LBS.unpack . B.encode $ pac
     calcSum :: [Word8] -> Word16
     calcSum ws = fromIntegral sum'''
       where
-        sum = calcSum' ws
+        sum = word16Sum ws
         sum' = (shiftR sum 16) + (sum .&. 0xFFFF)
         sum'' = sum' + (shiftR sum' 16)
         sum''' = 0x0000FFFF `xor` (sum'' .&. 0xFFFF)
 
-    calcSum' :: [Word8] -> Int32
-    calcSum' [] = 0
-    calcSum' [a] = fromIntegral a
-    calcSum' (a:b:xs) = ((shiftL (fromIntegral a) 8) .|. (fromIntegral b)) + calcSum' xs
+    word16Sum :: [Word8] -> Int32
+    word16Sum [] = 0
+    word16Sum [a] = fromIntegral a
+    word16Sum (a:b:xs) = ((shiftL (fromIntegral a) 8) .|. (fromIntegral b)) + word16Sum xs
 
 --------------------------------------------------------------------------------
 -- Instances

@@ -1,5 +1,6 @@
 module Packet.IP (
     Packet (..)
+  , updateChecksum
 ) where
 
 import Data.Bits
@@ -33,6 +34,24 @@ data Packet = Packet {
 
 
 --------------------------------------------------------------------------------
+-- Creating Packets
+--------------------------------------------------------------------------------
+
+-- updates the checksum
+updateChecksum :: Packet -> Packet
+updateChecksum packet = packet {checksum = calcSum . LBS.unpack . B.encode $ packet {checksum = 0, message = LBS.empty}}
+  where
+    calcSum :: [Word8] -> Word16
+    calcSum ws = fromIntegral sum
+      where
+        sum = (2 + word16Sum ws) `xor` 0xFFFF
+
+    word16Sum :: [Word8] -> Word16
+    word16Sum [] = 0
+    word16Sum (a:b:xs) = ((shiftL (fromIntegral a) 8) .|. (fromIntegral b)) + word16Sum xs
+
+
+--------------------------------------------------------------------------------
 -- Instances
 --------------------------------------------------------------------------------
 
@@ -41,7 +60,7 @@ instance B.Binary Packet where
             >> B.put ((shiftL (dscp packet) 2) .|. (ecn packet))
             >> B.put (Packet.IP.length packet)
             >> B.put (Packet.IP.id packet)
-            >> B.put ((shiftL (flags packet) 5) .|. (fragment packet))
+            >> B.put ((shiftL (flags packet) 13) .|. (fragment packet))
             >> B.put (ttl packet)
             >> B.put (protocol packet)
             >> B.put (checksum packet)
@@ -57,7 +76,7 @@ instance B.Binary Packet where
       flags_fragment <- (B.get :: B.Get Word16)
       ttl <- B.getWord8
       protocol <- B.getWord8
-      checksum <- B.get
+      checksum <- (B.get :: B.Get Word16)
       src <- (B.get :: B.Get Word32)
       dst <- (B.get :: B.Get Word32)
       message <- BG.getRemainingLazyByteString
@@ -68,8 +87,8 @@ instance B.Binary Packet where
         , ecn = dscp_ecn .&. 0x03
         , Packet.IP.length = length
         , Packet.IP.id = id
-        , flags = (shiftR flags_fragment 5) .&. 0x07
-        , fragment = flags_fragment .&. 0xC0
+        , flags = (shiftR flags_fragment 13) .&. 0x0007
+        , fragment = flags_fragment .&. 0x3FFF
         , ttl = ttl
         , protocol = protocol
         , checksum = checksum

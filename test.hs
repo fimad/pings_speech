@@ -23,8 +23,14 @@ readLoop socket = do
   --print $ Prelude.map ord $ packet
   --print $ ipSrc $ decode $ LBS.pack packet
   --print $ Prelude.map ord $ LBS.unpack $ IP.message ip
+  print $ Prelude.map ord $ packet
+  print $ Prelude.map ord $ LBS.unpack $ encode ip
+  putStr "\n"
+  print $ IP.checksum ip
+  print $ IP.checksum $ IP.updateChecksum ip
+  putStr "\n"
   print $ ICMP.checksum icmp
   print $ ICMP.checksum $ ICMP.updateChecksum icmp
-  putStr "\n"
+  putStr "\n\n"
   readLoop socket
 
