@@ -1,6 +1,7 @@
 module Packet.ICMP (
     Type (..)
   , Packet (..)
+  , flipType
   , updateChecksum
 ) where
 
@@ -19,9 +20,14 @@ import qualified Data.ByteString.Lazy as LBS
 --------------------------------------------------------------------------------
 
 data Type = EchoReply
-              | EchoRequest
-              | Other Word8
+          | EchoRequest
+          | Other Word8
   deriving (Show,Read,Eq)
+
+flipType :: Type -> Type
+flipType EchoReply = EchoRequest
+flipType EchoRequest = EchoReply
+flipType a = a
 
 
 data Packet = Packet {
