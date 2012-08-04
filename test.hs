@@ -1,14 +1,16 @@
 import Data.Char
 import Network.Socket
 import Data.Binary
+import qualified Data.Binary.Strict.Get as BSG
 import Data.Endian
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as CLBS
 
-import Speech
+--import Speech
 import qualified Packet.Speech as Speech
 import qualified Packet.ICMP as ICMP
 import qualified Packet.IP as IP
+
 
 icmpProtocol :: ProtocolNumber
 icmpProtocol = 1

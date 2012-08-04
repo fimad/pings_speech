@@ -21,6 +21,7 @@ import qualified Data.ByteString.Lazy.Char8 as CLBS
 
 -- Note: This does not obey network byte order
 --       To fix this I think you'd have to add LargeKey as an instance of Data.EndianSensitive
+--       And then add a wrapping call to convert to big endian for each put call and a from bigEndian on each get
 -- Actually: It looks like Data.Binary may encode words in big endian automatically, this requires further investigation
 
 
@@ -59,12 +60,11 @@ data Packet = Handshake1
             | BadPacket -- used for error catching in parsing packets
   deriving (Show,Eq)
 
-newtype SpeechPacket = SpeechPacket (Word256, Word128, Packet)-- Key, IV, packet
-
 --------------------------------------------------------------------------------
 -- Instances
 --------------------------------------------------------------------------------
 
+-- | allow Large words to play nicely with Data.Binary.Get/Put
 instance (B.Binary a, B.Binary b) => B.Binary (LargeKey a b) where
   put (LargeKey a b) = B.put a >> B.put b
   get = do
@@ -72,6 +72,7 @@ instance (B.Binary a, B.Binary b) => B.Binary (LargeKey a b) where
     b <- B.get
     return $ LargeKey a b
 
+-- | For use with the strict versions of Get and Put
 -- | The value of the first parameter is unimportant, only the type is used
 getLargeWordS :: (Bits a, Bits b, B.Binary a, B.Binary b) => LargeKey a b -> BSG.Get (LargeKey a b)
 getLargeWordS i = do
@@ -179,11 +180,18 @@ decode key iv lazyPacket =
       case (magic,packetType) of
           (0x4747, 0x01) -> return $ (Handshake1, iv)
 
+          -- The partial encryption of packets is handled by extracting the clear and encrypted separately
+          -- decrypting the encrypted portion, and then recombining them and passing to a secondary Binary.Strict.Get
+          -- extraction method
           (0x4747, 0x02) -> do
+                              -- extract the clear text portion of the header
                               unwrappedBytes <- (BSG.getByteString (160`div`8)) :: BSG.Get BS.ByteString
+                              -- extract the encrypted portion
                               remaining <- BSG.remaining
                               encryptedBytes <- (BSG.getByteString remaining)
+                              -- decrypt it and convert laziness (different libraries have different modiviation levels :/)
                               let (decryptedBytes, newIv) = (\(d,i) -> (toStrictBS d, i)) $ decryptHelper key iv $ toLazyBS encryptedBytes
+                              -- run the secondary extrator with the now all clear text packet
                               return $ eitherToPacket iv $ fst $ BSG.runGet (get newIv) (unwrappedBytes `BS.append` decryptedBytes)
                             where
                               get newIv = do

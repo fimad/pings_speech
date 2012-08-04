@@ -5,13 +5,16 @@ module DH (
   , getSecret -- shouldn't really ever need to see the secret unless debugging
   , getShared
   , genParams
+  , genParamsIO
   , paramsFromPrime
   , genSecret
+  , genSecretIO
   , genKey
 ) where
 
 import Prime
 import System.Random
+
 
 data DHParams a = InitialParams a a
                 | FinalParams a a a a
@@ -34,29 +37,38 @@ getShared :: DHParams a -> a
 getShared (FinalParams _ _ _ s) = s
 
 -- | Initialize a diffie-hellman session, generates a prime and a generator.
-genParams :: (Bounded a, Integral a, Num a) => IO (DHParams a)
-genParams = do
-  p <- prime (maxBound)
-  return $ InitialParams 5 p -- always use 5 as the generator, because why not
+genParams :: (RandomGen g, Bounded a, Integral a, Num a) => g -> DHParams a
+genParams g = InitialParams 5 (prime g (maxBound))
+
+genParamsIO :: (Bounded a, Integral a, Num a) => IO (DHParams a)
+genParamsIO = do
+  g <- newStdGen
+  return $ genParams g
 
 paramsFromPrime :: (Integral a, Num a) => a -> DHParams a
 paramsFromPrime p = InitialParams 5 p
 
 -- | Takes a DHParam returned by genParams and generates the secret integer and the shared value.
-genSecret :: (Bounded a, Integral a, Num a) => a -> DHParams a -> IO (DHParams a)
-genSecret max params = do
+genSecret :: (RandomGen g, Bounded a, Integral a, Num a) => g -> a -> DHParams a -> (DHParams a)
+genSecret g max params = 
+    let
+      (a,_) = randomR (2,fromIntegral max) g
+    in
+      FinalParams
+        (getGenerator params)
+        (getPrime params)
+        (fromIntegral (a :: Integer))
+        (fromIntegral $ powMod (fromIntegral $ getPrime params) (fromIntegral $ getGenerator params) a)
+
+genSecretIO :: (Bounded a, Integral a, Num a) => a -> DHParams a -> IO (DHParams a)
+genSecretIO max params = do
     g <- newStdGen
-    let (a,_) = randomR (2,fromIntegral max) g :: (Integer, StdGen)
-    return $ FinalParams
-      (getGenerator params)
-      (getPrime params)
-      (fromIntegral a)
-      (fromIntegral $ powMod (fromIntegral $ getPrime params) (fromIntegral $ getGenerator params) a)
+    return $ genSecret g max params
 
 -- | Takes a DHParam returned by 'genSecret' and the remote party's shared value and returns the secret key.
-genKey :: (Integral a, Num a) => DHParams a -> a -> IO a
-genKey params shared = do
-    return $ fromIntegral $ powMod
+genKey :: (Integral a, Num a) => DHParams a -> a -> a
+genKey params shared =
+    fromIntegral $ powMod
       (fromIntegral $ getPrime params)
       (fromIntegral $ shared)
       (fromIntegral $ getSecret params)

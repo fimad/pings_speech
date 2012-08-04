@@ -1,5 +1,6 @@
 module Prime (
     prime
+  , primeIO
   , mulMod
   , powMod
 ) where
@@ -8,13 +9,26 @@ import System.Random
 
 -- | Usage: prime (maxBound) :: IO Word64
 
-prime :: (Num a, Integral a) => a -> IO a
-prime max = do
+prime :: (RandomGen g, Num a, Integral a) => g -> a -> a
+prime gen max =
+  let
+    (g,g') = split gen
+    candidates = randomRs (2,fromIntegral max) g
+    tests = take 20 $ randoms g
+  in
+      fromIntegral
+    $ head
+    $ filter
+      (\c -> all
+             (millerRabinPrimality c)
+             (map (\a -> (a `mod` (fromIntegral c - 3)) + 2) tests)
+      )
+      candidates
+
+primeIO :: (Num a, Integral a) => a -> IO a
+primeIO max = do
   g <- newStdGen
-  g' <- newStdGen
-  let candidates = randomRs (2,fromIntegral max) g
-  let tests = take 20 $ randoms g
-  return $ fromIntegral $ head $ filter (\c -> all (millerRabinPrimality c) (map (\a -> (a `mod` (fromIntegral c - 3)) + 2) tests)) candidates
+  return $ prime g max
 
 
 --------------------------------------------------------------------------------

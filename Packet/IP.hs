@@ -1,6 +1,7 @@
 module Packet.IP (
     Packet (..)
   , updateChecksum
+  , IpAddress
 ) where
 
 import Data.Bits
@@ -15,6 +16,8 @@ import qualified Data.ByteString.Lazy.Char8 as CLBS
 -- DataTypes
 --------------------------------------------------------------------------------
 
+type IpAddress = Word32
+
 data Packet = Packet {
       version :: Word8
     , headerLen :: Word8
@@ -27,8 +30,8 @@ data Packet = Packet {
     , ttl :: Word8
     , protocol :: Word8
     , checksum :: Word16
-    , src :: Word32
-    , dst :: Word32
+    , src :: IpAddress
+    , dst :: IpAddress
     , message :: CLBS.ByteString
   } deriving (Show,Read,Eq)
 
