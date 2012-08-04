@@ -14,6 +14,7 @@ import System.Random
 
 data DHParams a = InitialParams a a
                 | FinalParams a a a a
+  deriving (Show,Eq)
 
 getPrime :: DHParams a -> a
 getPrime (InitialParams _ p) = p
