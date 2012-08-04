@@ -5,6 +5,7 @@ module DH (
   , getSecret -- shouldn't really ever need to see the secret unless debugging
   , getShared
   , genParams
+  , paramsFromPrime
   , genSecret
   , genKey
 ) where
@@ -37,6 +38,9 @@ genParams :: (Bounded a, Integral a, Num a) => IO (DHParams a)
 genParams = do
   p <- prime (maxBound)
   return $ InitialParams 5 p -- always use 5 as the generator, because why not
+
+paramsFromPrime :: (Integral a, Num a) => a -> DHParams a
+paramsFromPrime p = InitialParams 5 p
 
 -- | Takes a DHParam returned by genParams and generates the secret integer and the shared value.
 genSecret :: (Bounded a, Integral a, Num a) => a -> DHParams a -> IO (DHParams a)

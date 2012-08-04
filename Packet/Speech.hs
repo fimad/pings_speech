@@ -67,6 +67,11 @@ instance (B.Binary a, B.Binary b) => B.Binary (LargeKey a b) where
     b <- B.get
     return $ LargeKey a b
 
+getLargeWordS :: (Bits a, Bits b, B.Binary a, B.Binary b) => LargeKey a b -> BSG.Get (LargeKey a b)
+getLargeWordS i = do
+  bytes <- BSG.getByteString ((bitSize . hiHalf) i + (bitSize . loHalf) i)
+  return $ BG.runGet (B.get) (LBS.fromChunks [bytes])
+
 
 --------------------------------------------------------------------------------
 -- Encoding packets
@@ -156,42 +161,44 @@ decode key iv lazyPacket =
 
     strictPacket = toStrictBS lazyPacket
 
+    eitherToPacket iv (Left _)  = (BadPacket,iv)
+    eitherToPacket iv (Right p) = p
+
     getPacket :: BSG.Get (Packet,IV)
     getPacket = do
       magic <- BSG.getWord16host
       packetType <- BSG.getWord8
-      getResult <- 
-        (case (magic,packetType) of
-          (0x4747, 0x01) -> return (Handshake1, iv)
+      case (magic,packetType) of
+          (0x4747, 0x01) -> return $ (Handshake1, iv)
 
           (0x4747, 0x02) -> do
                               unwrappedBytes <- (BSG.getByteString 128) :: BSG.Get BS.ByteString
                               remaining <- BSG.remaining
                               encryptedBytes <- (BSG.getByteString remaining)
                               let (decryptedBytes, newIv) = (\(d,i) -> (toStrictBS d, i)) $ decryptHelper key iv $ toLazyBS encryptedBytes
-                              return $ BSG.runGet (get newIv) (unwrappedBytes `BS.append` decryptedBytes)
+                              return $ eitherToPacket iv $ fst $ BSG.runGet (get newIv) (unwrappedBytes `BS.append` decryptedBytes)
                             where
                               get :: IV -> BSG.Get (Packet,IV)
                               get newIv = do
-                                iv <- (B.get :: BSG.Get Word128) -- todo: Cannot use the Data.Binary instance to get, you have to implement your own function for strictness
-                                prime <- (B.get :: Word256)
-                                nonce <- (B.get :: Word32)
+                                iv <- (getLargeWordS 0 :: BSG.Get Word128)
+                                prime <- (getLargeWordS 0:: BSG.Get Word256)
+                                nonce <- BSG.getWord32host
                                 return $ ( Handshake2 {
                                     authIV = iv
-                                  , dhParams = prime
+                                  , dhParams = paramsFromPrime prime
                                   , serverNonce = nonce
                                 }, newIv)
 
           (0x4747, 0x03) -> do
                               remaining <- BSG.remaining
                               encryptedBytes <- (BSG.getByteString remaining)
-                              let (decryptedBytes, newIv) = decryptHelper key iv encryptedBytes
-                              return $ BSG.runGet (get newIv) decryptedBytes
+                              let (decryptedBytes, newIv) = (\(d,i) -> (toStrictBS d, i)) $ decryptHelper key iv $ toLazyBS encryptedBytes
+                              return $ eitherToPacket iv $ fst $ BSG.runGet (get newIv) (decryptedBytes)
                             where
                               get newIv = do
-                                shared <- (B.get :: Word256)
-                                snonce <- (B.get :: Word32)
-                                cnonce <- (B.get :: Word32)
+                                shared <- (getLargeWordS 0 :: BSG.Get Word256)
+                                snonce <- (BSG.getWord32host)
+                                cnonce <- (BSG.getWord32host)
                                 return $ ( Handshake3 {
                                     dhShared = shared
                                   , serverNonce = snonce
@@ -201,14 +208,14 @@ decode key iv lazyPacket =
           (0x4747, 0x04) -> do
                               remaining <- BSG.remaining
                               encryptedBytes <- (BSG.getByteString remaining)
-                              let (decryptedBytes, newIv) = decryptHelper key iv encryptedBytes
-                              return $ BSG.runGet (get newIv) decryptedBytes
+                              let (decryptedBytes, newIv) = (\(d,i) -> (toStrictBS d, i)) $ decryptHelper key iv $ toLazyBS encryptedBytes
+                              return $ eitherToPacket iv $ fst $ BSG.runGet (get newIv) (decryptedBytes)
                             where
                               get newIv = do
-                                shared <- (B.get :: Word256)
-                                sessIv <- (B.get :: Word128)
-                                cnonce <- (B.get :: Word32)
-                                sess <- (B.get :: Word32)
+                                shared <- (getLargeWordS 0 :: BSG.Get Word256)
+                                sessIv <- (getLargeWordS 0 :: BSG.Get Word128)
+                                cnonce <- (BSG.getWord32host)
+                                sess <- (BSG.getWord32host)
                                 return $ ( Handshake4 {
                                     dhShared = shared
                                   , sessIV = sessIv
@@ -220,35 +227,32 @@ decode key iv lazyPacket =
                               unwrappedBytes <- (BSG.getByteString 96)
                               remaining <- BSG.remaining
                               encryptedBytes <- (BSG.getByteString remaining)
-                              let (decryptedBytes, newIv) = decryptHelper key iv encryptedBytes
-                              return $ BSG.runGet (get newIv) (unwrappedBytes `BS.append` decryptedBytes)
+                              let (decryptedBytes, newIv) = (\(d,i) -> (toStrictBS d, i)) $ decryptHelper key iv $ toLazyBS encryptedBytes
+                              return $ eitherToPacket iv $ fst $ BSG.runGet (get newIv) (unwrappedBytes `BS.append` decryptedBytes)
                             where
                               get newIv = do
-                                sess <- (B.get :: Word32)
-                                seq <- (B.get :: Word64)
-                                msg <- B.get
-                                return $ ( Handshake2 {
+                                sess <- (BSG.getWord32host)
+                                seq <- (BSG.getWord64host)
+                                remaining <- BSG.remaining
+                                msg <- (BSG.getByteString remaining)
+                                return $ ( Send {
                                     sessionId = sess
                                   , sequenceId = seq
-                                  , message = msg
+                                  , message = toLazyBS msg
                                 }, newIv)
 
           (0x4747, 0x20) -> do
                               unwrappedBytes <- (BSG.getByteString 96)
-                              return $ BSG.runGet (get iv) unwrappedBytes
+                              return $ eitherToPacket iv $ fst $ BSG.runGet (get iv) (unwrappedBytes)
                             where
                               get newIv = do
-                                sess <- (B.get :: Word32)
-                                seq <- (B.get :: Word64)
+                                sess <- (BSG.getWord32host)
+                                seq <- (BSG.getWord64host)
                                 return $ ( Confirm {
                                     sessionId = sess
                                   , sequenceId = seq
                                 }, newIv)
 
-          _              -> Right (BadPacket,iv)
-        :: Either String (Packet,IV))
-
-      return $ (case (fst $ getResult) of
-        Left _  -> BadPacket
-        Right r -> r)
+          _              -> return (BadPacket,iv)
+        :: BSG.Get (Packet,IV)
 
