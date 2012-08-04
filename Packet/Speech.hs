@@ -8,11 +8,17 @@ import CryptoHelper
 import Data.Bits
 import Data.Word
 import Data.LargeWord
+import Control.Monad
 import qualified Data.Binary as B
 import qualified Data.Binary.Get as BG
+import qualified Data.Binary.Strict.Get as BSG
 import qualified Data.Binary.Put as BP
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as CLBS
+
+-- Note: This does not obey network byte order
+--       To fix this I think you'd have to add LargeKey as an instance of Data.EndianSensitive
 
 
 --------------------------------------------------------------------------------
@@ -138,5 +144,111 @@ encode key iv _                           =( BP.runPut
 -- Decoding packets
 --------------------------------------------------------------------------------
 
+-- | Returns either an error message or the result
 decode :: Key -> IV -> LBS.ByteString -> (Packet,IV)
-decode _ iv _ = (BadPacket,iv)
+decode key iv lazyPacket = 
+    case fst $ BSG.runGet getPacket strictPacket of
+      Left _       -> (BadPacket,iv)
+      Right result -> result
+  where
+    toStrictBS = BS.concat . LBS.toChunks
+    toLazyBS = LBS.fromChunks . (\a -> [a])
+
+    strictPacket = toStrictBS lazyPacket
+
+    getPacket :: BSG.Get (Packet,IV)
+    getPacket = do
+      magic <- BSG.getWord16host
+      packetType <- BSG.getWord8
+      getResult <- 
+        (case (magic,packetType) of
+          (0x4747, 0x01) -> return (Handshake1, iv)
+
+          (0x4747, 0x02) -> do
+                              unwrappedBytes <- (BSG.getByteString 128) :: BSG.Get BS.ByteString
+                              remaining <- BSG.remaining
+                              encryptedBytes <- (BSG.getByteString remaining)
+                              let (decryptedBytes, newIv) = (\(d,i) -> (toStrictBS d, i)) $ decryptHelper key iv $ toLazyBS encryptedBytes
+                              return $ BSG.runGet (get newIv) (unwrappedBytes `BS.append` decryptedBytes)
+                            where
+                              get :: IV -> BSG.Get (Packet,IV)
+                              get newIv = do
+                                iv <- (B.get :: BSG.Get Word128) -- todo: Cannot use the Data.Binary instance to get, you have to implement your own function for strictness
+                                prime <- (B.get :: Word256)
+                                nonce <- (B.get :: Word32)
+                                return $ ( Handshake2 {
+                                    authIV = iv
+                                  , dhParams = prime
+                                  , serverNonce = nonce
+                                }, newIv)
+
+          (0x4747, 0x03) -> do
+                              remaining <- BSG.remaining
+                              encryptedBytes <- (BSG.getByteString remaining)
+                              let (decryptedBytes, newIv) = decryptHelper key iv encryptedBytes
+                              return $ BSG.runGet (get newIv) decryptedBytes
+                            where
+                              get newIv = do
+                                shared <- (B.get :: Word256)
+                                snonce <- (B.get :: Word32)
+                                cnonce <- (B.get :: Word32)
+                                return $ ( Handshake3 {
+                                    dhShared = shared
+                                  , serverNonce = snonce
+                                  , clientNonce = cnonce
+                                }, newIv)
+
+          (0x4747, 0x04) -> do
+                              remaining <- BSG.remaining
+                              encryptedBytes <- (BSG.getByteString remaining)
+                              let (decryptedBytes, newIv) = decryptHelper key iv encryptedBytes
+                              return $ BSG.runGet (get newIv) decryptedBytes
+                            where
+                              get newIv = do
+                                shared <- (B.get :: Word256)
+                                sessIv <- (B.get :: Word128)
+                                cnonce <- (B.get :: Word32)
+                                sess <- (B.get :: Word32)
+                                return $ ( Handshake4 {
+                                    dhShared = shared
+                                  , sessIV = sessIv
+                                  , clientNonce = cnonce
+                                  , sessionId = sess
+                                }, newIv)
+
+          (0x4747, 0x10) -> do
+                              unwrappedBytes <- (BSG.getByteString 96)
+                              remaining <- BSG.remaining
+                              encryptedBytes <- (BSG.getByteString remaining)
+                              let (decryptedBytes, newIv) = decryptHelper key iv encryptedBytes
+                              return $ BSG.runGet (get newIv) (unwrappedBytes `BS.append` decryptedBytes)
+                            where
+                              get newIv = do
+                                sess <- (B.get :: Word32)
+                                seq <- (B.get :: Word64)
+                                msg <- B.get
+                                return $ ( Handshake2 {
+                                    sessionId = sess
+                                  , sequenceId = seq
+                                  , message = msg
+                                }, newIv)
+
+          (0x4747, 0x20) -> do
+                              unwrappedBytes <- (BSG.getByteString 96)
+                              return $ BSG.runGet (get iv) unwrappedBytes
+                            where
+                              get newIv = do
+                                sess <- (B.get :: Word32)
+                                seq <- (B.get :: Word64)
+                                return $ ( Confirm {
+                                    sessionId = sess
+                                  , sequenceId = seq
+                                }, newIv)
+
+          _              -> Right (BadPacket,iv)
+        :: Either String (Packet,IV))
+
+      return $ (case (fst $ getResult) of
+        Left _  -> BadPacket
+        Right r -> r)
+
