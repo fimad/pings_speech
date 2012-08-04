@@ -1,5 +1,7 @@
 module Packet.Speech (
     Packet (..)
+  , encode
+  , decode
 ) where
 
 import DH
@@ -19,6 +21,7 @@ import qualified Data.ByteString.Lazy.Char8 as CLBS
 
 -- Note: This does not obey network byte order
 --       To fix this I think you'd have to add LargeKey as an instance of Data.EndianSensitive
+-- Actually: It looks like Data.Binary may encode words in big endian automatically, this requires further investigation
 
 
 --------------------------------------------------------------------------------
@@ -27,20 +30,22 @@ import qualified Data.ByteString.Lazy.Char8 as CLBS
 
 data Packet = Handshake1
             | Handshake2 {
-                authIV :: Word128
+                sessionId :: Word32
+              , authIV :: Word128
               , dhParams :: DHParams Word256
               , serverNonce :: Word32
             }
             | Handshake3 {
-                dhShared :: Word256
+                sessionId :: Word32
+              , dhShared :: Word256
               , serverNonce :: Word32
               , clientNonce :: Word32
             }
             | Handshake4 {
-                dhShared :: Word256
+                sessionId :: Word32
+              , dhShared :: Word256
               , sessIV :: Word128
               , clientNonce :: Word32
-              , sessionId :: Word32
             }
             | Send {
                 sessionId :: Word32
@@ -67,9 +72,10 @@ instance (B.Binary a, B.Binary b) => B.Binary (LargeKey a b) where
     b <- B.get
     return $ LargeKey a b
 
+-- | The value of the first parameter is unimportant, only the type is used
 getLargeWordS :: (Bits a, Bits b, B.Binary a, B.Binary b) => LargeKey a b -> BSG.Get (LargeKey a b)
 getLargeWordS i = do
-  bytes <- BSG.getByteString ((bitSize . hiHalf) i + (bitSize . loHalf) i)
+  bytes <- BSG.getByteString (((bitSize . hiHalf) i + (bitSize . loHalf) i)`div`8)
   return $ BG.runGet (B.get) (LBS.fromChunks [bytes])
 
 
@@ -78,66 +84,68 @@ getLargeWordS i = do
 --------------------------------------------------------------------------------
 
 encode :: Key -> IV -> Packet -> (LBS.ByteString,IV)
-encode _ iv Handshake1                    =( BP.runPut 
-                                           $ B.put (0x4747 :: Word16)
-                                          >> B.put (0x01 :: Word8)
-                                           , iv )
+encode _ iv Handshake1                      =( BP.runPut 
+                                             $ B.put (0x4747 :: Word16)
+                                            >> B.put (0x01 :: Word8)
+                                             , iv )
 
 
-encode key iv (packet@(Handshake2 _ _ _)) =( BP.runPut
-                                           $ B.put (0x4747 :: Word16)
-                                          >> B.put (0x02 :: Word8)
-                                          >> B.put (authIV packet)
-                                          >> B.put enc
-                                           , newIv )
+encode key iv (packet@(Handshake2 _ _ _ _)) =( BP.runPut
+                                             $ B.put (0x4747 :: Word16)
+                                            >> B.put (0x02 :: Word8)
+                                            >> B.put (sessionId packet)
+                                            >> B.put (authIV packet)
+                                            >> (sequence_ $ map B.put (LBS.unpack enc))
+                                             , newIv )
   where
-    (enc, newIv) = encryptHelper key iv    $ BP.runPut 
-                                           $ B.put (getPrime $ dhParams packet)
-                                          >> B.put (serverNonce packet)
+    (enc, newIv) = encryptHelper key iv      $ BP.runPut 
+                                             $ B.put (getPrime $ dhParams packet)
+                                            >> B.put (serverNonce packet)
 
 
-encode key iv (packet@(Handshake3 _ _ _)) =( BP.runPut
-                                           $ B.put (0x4747 :: Word16)
-                                          >> B.put (0x03 :: Word8)
-                                          >> B.put enc
-                                           , newIv )
+encode key iv (packet@(Handshake3 _ _ _ _)) =( BP.runPut
+                                             $ B.put (0x4747 :: Word16)
+                                            >> B.put (0x03 :: Word8)
+                                            >> B.put (sessionId packet)
+                                            >> (sequence_ $ map B.put (LBS.unpack enc))
+                                             , newIv )
   where
-    (enc, newIv) = encryptHelper key iv    $ BP.runPut 
-                                           $ B.put (dhShared packet)
-                                          >> B.put (serverNonce packet)
-                                          >> B.put (clientNonce packet)
+    (enc, newIv) = encryptHelper key iv      $ BP.runPut 
+                                             $ B.put (dhShared packet)
+                                            >> B.put (serverNonce packet)
+                                            >> B.put (clientNonce packet)
 
 
-encode key iv (packet@(Handshake4 _ _ _ _))=(BP.runPut
-                                           $ B.put (0x4747 :: Word16)
-                                          >> B.put (0x04 :: Word8)
-                                          >> B.put enc
-                                           , newIv )
+encode key iv (packet@(Handshake4 _ _ _ _)) =( BP.runPut
+                                             $ B.put (0x4747 :: Word16)
+                                            >> B.put (0x04 :: Word8)
+                                            >> B.put (sessionId packet)
+                                            >> (sequence_ $ map B.put (LBS.unpack enc))
+                                             , newIv )
   where
-    (enc, newIv) = encryptHelper key iv    $ BP.runPut 
-                                           $ B.put (dhShared packet)
-                                          >> B.put (sessIV packet)
-                                          >> B.put (clientNonce packet)
-                                          >> B.put (sessionId packet)
+    (enc, newIv) = encryptHelper key iv      $ BP.runPut 
+                                             $ B.put (dhShared packet)
+                                            >> B.put (sessIV packet)
+                                            >> B.put (clientNonce packet)
 
 
-encode key iv (packet@(Send _ _ _))       =( BP.runPut
-                                           $ B.put (0x4747 :: Word16)
-                                          >> B.put (0x10 :: Word8)
-                                          >> B.put (sessionId packet)
-                                          >> B.put (sequenceId packet)
-                                          >> B.put enc
-                                           , newIv )
+encode key iv (packet@(Send _ _ _))         =( BP.runPut
+                                             $ B.put (0x4747 :: Word16)
+                                            >> B.put (0x10 :: Word8)
+                                            >> B.put (sessionId packet)
+                                            >> B.put (sequenceId packet)
+                                            >> (sequence_ $ map B.put (LBS.unpack enc))
+                                             , newIv )
   where
-    (enc, newIv) = encryptHelper key iv    $ message packet
+    (enc, newIv) = encryptHelper key iv      $ message packet
 
     
-encode key iv (packet@(Confirm _ _))      =( BP.runPut
-                                           $ B.put (0x4747 :: Word16)
-                                          >> B.put (0x20 :: Word8)
-                                          >> B.put (sessionId packet)
-                                          >> B.put (sequenceId packet)
-                                           , iv )
+encode key iv (packet@(Confirm _ _))        =( BP.runPut
+                                             $ B.put (0x4747 :: Word16)
+                                            >> B.put (0x20 :: Word8)
+                                            >> B.put (sessionId packet)
+                                            >> B.put (sequenceId packet)
+                                             , iv )
 
 
 encode key iv _                           =( BP.runPut
@@ -172,67 +180,72 @@ decode key iv lazyPacket =
           (0x4747, 0x01) -> return $ (Handshake1, iv)
 
           (0x4747, 0x02) -> do
-                              unwrappedBytes <- (BSG.getByteString 128) :: BSG.Get BS.ByteString
+                              unwrappedBytes <- (BSG.getByteString (160`div`8)) :: BSG.Get BS.ByteString
                               remaining <- BSG.remaining
                               encryptedBytes <- (BSG.getByteString remaining)
                               let (decryptedBytes, newIv) = (\(d,i) -> (toStrictBS d, i)) $ decryptHelper key iv $ toLazyBS encryptedBytes
                               return $ eitherToPacket iv $ fst $ BSG.runGet (get newIv) (unwrappedBytes `BS.append` decryptedBytes)
                             where
-                              get :: IV -> BSG.Get (Packet,IV)
                               get newIv = do
+                                sess <- BSG.getWord32be
                                 iv <- (getLargeWordS 0 :: BSG.Get Word128)
                                 prime <- (getLargeWordS 0:: BSG.Get Word256)
-                                nonce <- BSG.getWord32host
+                                nonce <- BSG.getWord32be
                                 return $ ( Handshake2 {
-                                    authIV = iv
+                                    sessionId = sess
+                                  , authIV = iv
                                   , dhParams = paramsFromPrime prime
                                   , serverNonce = nonce
                                 }, newIv)
 
           (0x4747, 0x03) -> do
-                              remaining <- BSG.remaining
-                              encryptedBytes <- (BSG.getByteString remaining)
-                              let (decryptedBytes, newIv) = (\(d,i) -> (toStrictBS d, i)) $ decryptHelper key iv $ toLazyBS encryptedBytes
-                              return $ eitherToPacket iv $ fst $ BSG.runGet (get newIv) (decryptedBytes)
-                            where
-                              get newIv = do
-                                shared <- (getLargeWordS 0 :: BSG.Get Word256)
-                                snonce <- (BSG.getWord32host)
-                                cnonce <- (BSG.getWord32host)
-                                return $ ( Handshake3 {
-                                    dhShared = shared
-                                  , serverNonce = snonce
-                                  , clientNonce = cnonce
-                                }, newIv)
-
-          (0x4747, 0x04) -> do
-                              remaining <- BSG.remaining
-                              encryptedBytes <- (BSG.getByteString remaining)
-                              let (decryptedBytes, newIv) = (\(d,i) -> (toStrictBS d, i)) $ decryptHelper key iv $ toLazyBS encryptedBytes
-                              return $ eitherToPacket iv $ fst $ BSG.runGet (get newIv) (decryptedBytes)
-                            where
-                              get newIv = do
-                                shared <- (getLargeWordS 0 :: BSG.Get Word256)
-                                sessIv <- (getLargeWordS 0 :: BSG.Get Word128)
-                                cnonce <- (BSG.getWord32host)
-                                sess <- (BSG.getWord32host)
-                                return $ ( Handshake4 {
-                                    dhShared = shared
-                                  , sessIV = sessIv
-                                  , clientNonce = cnonce
-                                  , sessionId = sess
-                                }, newIv)
-
-          (0x4747, 0x10) -> do
-                              unwrappedBytes <- (BSG.getByteString 96)
+                              unwrappedBytes <- (BSG.getByteString (32`div`8)) :: BSG.Get BS.ByteString
                               remaining <- BSG.remaining
                               encryptedBytes <- (BSG.getByteString remaining)
                               let (decryptedBytes, newIv) = (\(d,i) -> (toStrictBS d, i)) $ decryptHelper key iv $ toLazyBS encryptedBytes
                               return $ eitherToPacket iv $ fst $ BSG.runGet (get newIv) (unwrappedBytes `BS.append` decryptedBytes)
                             where
                               get newIv = do
-                                sess <- (BSG.getWord32host)
-                                seq <- (BSG.getWord64host)
+                                sess   <- (BSG.getWord32be)
+                                shared <- (getLargeWordS 0 :: BSG.Get Word256)
+                                snonce <- (BSG.getWord32be)
+                                cnonce <- (BSG.getWord32be)
+                                return $ ( Handshake3 {
+                                    sessionId = sess
+                                  , dhShared = shared
+                                  , serverNonce = snonce
+                                  , clientNonce = cnonce
+                                }, newIv)
+
+          (0x4747, 0x04) -> do
+                              unwrappedBytes <- (BSG.getByteString (32`div`8)) :: BSG.Get BS.ByteString
+                              remaining <- BSG.remaining
+                              encryptedBytes <- (BSG.getByteString remaining)
+                              let (decryptedBytes, newIv) = (\(d,i) -> (toStrictBS d, i)) $ decryptHelper key iv $ toLazyBS encryptedBytes
+                              return $ eitherToPacket iv $ fst $ BSG.runGet (get newIv) (unwrappedBytes `BS.append` decryptedBytes)
+                            where
+                              get newIv = do
+                                sess   <- (BSG.getWord32be)
+                                shared <- (getLargeWordS 0 :: BSG.Get Word256)
+                                sessIv <- (getLargeWordS 0 :: BSG.Get Word128)
+                                cnonce <- (BSG.getWord32be)
+                                return $ ( Handshake4 {
+                                    sessionId = sess
+                                  , dhShared = shared
+                                  , sessIV = sessIv
+                                  , clientNonce = cnonce
+                                }, newIv)
+
+          (0x4747, 0x10) -> do
+                              unwrappedBytes <- (BSG.getByteString (96`div`8))
+                              remaining <- BSG.remaining
+                              encryptedBytes <- (BSG.getByteString remaining)
+                              let (decryptedBytes, newIv) = (\(d,i) -> (toStrictBS d, i)) $ decryptHelper key iv $ toLazyBS encryptedBytes
+                              return $ eitherToPacket iv $ fst $ BSG.runGet (get newIv) (unwrappedBytes `BS.append` decryptedBytes)
+                            where
+                              get newIv = do
+                                sess <- (BSG.getWord32be)
+                                seq <- (BSG.getWord64be)
                                 remaining <- BSG.remaining
                                 msg <- (BSG.getByteString remaining)
                                 return $ ( Send {
@@ -242,12 +255,12 @@ decode key iv lazyPacket =
                                 }, newIv)
 
           (0x4747, 0x20) -> do
-                              unwrappedBytes <- (BSG.getByteString 96)
+                              unwrappedBytes <- (BSG.getByteString (96`div`8))
                               return $ eitherToPacket iv $ fst $ BSG.runGet (get iv) (unwrappedBytes)
                             where
                               get newIv = do
-                                sess <- (BSG.getWord32host)
-                                seq <- (BSG.getWord64host)
+                                sess <- (BSG.getWord32be)
+                                seq <- (BSG.getWord64be)
                                 return $ ( Confirm {
                                     sessionId = sess
                                   , sequenceId = seq
