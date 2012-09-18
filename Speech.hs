@@ -3,6 +3,13 @@ module Speech (
   , Options
   , ConnectionState
   , handlePacket
+
+  -- | API
+  , SpeechSessionHandle
+  , connectToServer
+  , startSingleUserServer
+  , writeSpeech
+  , readSpeech
 ) where
 
 import DH
@@ -10,10 +17,19 @@ import CryptoHelper
 import qualified Packet.IP as IP
 import qualified Packet.ICMP as ICMP
 import qualified Packet.Speech as SPCH
+import qualified ThreadedBuffer as TB
 
 import Data.Word
 import Data.LargeWord
+import System.Clock
 import System.Random
+import Control.Monad
+import Control.Concurrent
+import Control.Concurrent.MVar
+import qualified Network.Socket as S
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Heap as Heap
+
 
 
 type Session  = Word32
@@ -28,7 +44,11 @@ data Options = Options {
     , sessionKey :: Key
     , txIv :: IV -- | the IV for encrypting/transmitting packets
     , rxIv :: IV -- | the IV for decrypting/receiving packets
-  } deriving (Show,Eq)
+    , inputBuffer :: MVar [LBS.ByteString] -- | Messages that need to be sent out
+    , outputBuffer :: MVar [LBS.ByteString] -- | Messages that have been recieved
+    , isActive :: MVar Bool
+    , sendQueue :: Heap.Heap (Heap.Entry TimeSpec (SPCH.Packet,Bool)) -- (when to send, (packet, needs confirmation?))
+  } --deriving (Show,Eq)
 
 data ConnectionState = SentHandshake1
                      | SentHandshake2 (DHParams Word256) Nonce
@@ -37,10 +57,146 @@ data ConnectionState = SentHandshake1
                      | Closed
   deriving (Show,Eq)
 
--- TODO add the packet queue to the state so that handlePacket can remove packets that have been confirmed
--- TODO we also need a way to get message out of the state..... 
 type SpeechState = (ConnectionState,Options)
+
+-- The library client has a handle to the input and output buffers
+type SpeechSessionHandle = (MVar Bool, MVar [LBS.ByteString], MVar [LBS.ByteString]) -- (active,input,output)
+
+
+--------------------------------------------------------------------------------
+-- Speech IO API
+--------------------------------------------------------------------------------
+
+-- | Reads all the recieved speech messages from the buffer
+readSpeech :: SpeechSessionHandle -> IO [LBS.ByteString]
+readSpeech (_,_,output) = TB.get output 
+
+-- | Writes a list of messages to the input buffer of a speech session
+-- | It is more efficient to make one call with many messages, than many calls with single messages
+writeSpeech :: SpeechSessionHandle -> [LBS.ByteString] -> IO ()
+writeSpeech (_,input,_) messages = TB.put input messages
+
+--------------------------------------------------------------------------------
+-- Speech Utilities
+--------------------------------------------------------------------------------
+
+-- | Creates a new handle to a speech session
+newHandle :: IO SpeechSessionHandle
+newHandle = do
+  active <- newMVar True
+  input <- newMVar []
+  output <- newMVar []
+  return (active,input,output)
+
+-- | Creates a handle for a specific speech state
+handleFromState :: SpeechState -> SpeechSessionHandle
+handleFromState (state,options) = (isActive options, inputBuffer options, outputBuffer options)
+
+-- | Provides "sane" defaults for options, hopefull each will get a real value before being used.
+defaultOptions :: IO Options
+defaultOptions = do
+  ib <- newMVar []
+  ob <- newMVar []
+  active <- newMVar True
+  return $ Options {
+      icmpType = ICMP.EchoReply
+    , otherIp = 0
+    , sessionId = 0
+    , sessionKey = 0
+    , txIv = 0
+    , rxIv = 0
+    , inputBuffer = ib
+    , outputBuffer = ob
+    , isActive = active
+    , sendQueue = Heap.empty
+  }
+
+queuePacket :: Bool -> SPCH.Packet -> SpeechState -> IO SpeechState
+queuePacket confirm packet (state,options) = do
+  currentTime <- getTime Monotonic
+  let newQueue = Heap.insert (Heap.Entry currentTime (packet,confirm)) (sendQueue options)
+  return (state, options {sendQueue = newQueue})
+
+queueReliablePacket :: SPCH.Packet -> SpeechState -> IO SpeechState
+queueReliablePacket = queuePacket True
+
+queueUnreliablePacket :: SPCH.Packet -> SpeechState -> IO SpeechState
+queueUnreliablePacket = queuePacket False
+
+--------------------------------------------------------------------------------
+-- Generic Speech Worker Thread
+--------------------------------------------------------------------------------
+
+speechThread :: SpeechState -> IO ()
+speechThread (state,options) = do
+  readSocket <- S.socket S.AF_INET S.Raw 1 -- 1 is the icmpProtocol 
+  writeSocket <- S.socket S.AF_INET S.Raw S.defaultProtocol
+  threadLoop (state,options) readSocket writeSocket
+  where
+    threadLoop (state,options) readSocket writeSocket = do
+      --write inputBuffer to writeSocket
+      (state',options') <- case state of
+        Established mySeq theirSeq -> do
+          -- send the buffered messages
+          messages <- TB.get $ inputBuffer options
+          foldM queueMessagePacket (state,options) messages
+        otherwise ->
+          -- don't try to send messages until we are established
+          return (state,options)
+
+      --handle packets off readSocket
+      --TODO IMPLEMENT ME!
+
+      --process the packet queue
+      --TODO IMPLEMENT ME!
+
+      yield -- play nice and share the cpu
+      --TODO should terminate when the we are no longer active
+      threadLoop (state',options') readSocket writeSocket
+
+    queueMessagePacket (Established mySeq theirSeq, options) message = do
+      let packet = SPCH.Send {
+          SPCH.sessionId = sessionId options
+        , SPCH.sequenceId = mySeq
+        , SPCH.message = message
+      }
+      queueReliablePacket packet ((Established (mySeq+1) theirSeq), options)
+
+
+--------------------------------------------------------------------------------
+-- Speech Client
+--------------------------------------------------------------------------------
+
+-- | Connects to a server, spawns a worker thread to handle networking and returns the handle
+connectToServer :: IP.IpAddress -> IO SpeechSessionHandle
+connectToServer ip = do
+  options <- defaultOptions  >>= (\o -> return o{
+        otherIp = ip
+      , icmpType = ICMP.EchoRequest
+    })
+  let state = (SentHandshake1, options) 
+  let handle = handleFromState state
+  state' <- queueUnreliablePacket SPCH.Handshake1 state -- queue the first handshake packet
+  forkIO $ speechThread state -- spawn worker bee
+  return handle
+
+
+--------------------------------------------------------------------------------
+-- Speech Server
+--------------------------------------------------------------------------------
  
+-- TODO The server needs to figure out what the other IP is at some point
+--      Seems like it should be handled by the handlePacket functon but it is not privy to the ip
+-- | Stars a server that only handles a single connection at a time.
+startSingleUserServer :: IO SpeechSessionHandle
+startSingleUserServer = do
+  options <- defaultOptions >>= (\o -> return o{
+        icmpType = ICMP.EchoReply
+    })
+  let state = (Closed, options)
+  let handle = handleFromState state
+  forkIO $ speechThread state -- spawn worker bee
+  return handle
 
 --------------------------------------------------------------------------------
 -- Handle Packets

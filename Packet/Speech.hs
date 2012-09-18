@@ -149,9 +149,9 @@ encode key iv (packet@(Confirm _ _))        =( BP.runPut
                                              , iv )
 
 
-encode key iv _                           =( BP.runPut
-                                           $ B.put (0x00 :: Word8)
-                                           , iv )
+encode key iv _                             =( BP.runPut
+                                             $ B.put (0x00 :: Word8)
+                                             , iv )
 
 
 --------------------------------------------------------------------------------
@@ -275,5 +275,4 @@ decode key iv lazyPacket =
                                 }, newIv)
 
           _              -> return (BadPacket,iv)
-        :: BSG.Get (Packet,IV)
 
